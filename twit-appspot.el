@@ -1,9 +1,10 @@
 ;;; twit-appspot.el --- interface with twitter.com
-(defvar twit-version-number "0.3.5")
+(defvar twit-version-number "0.3.12")
 ;; Copyright (c) 2007 Theron Tlax
 ;;           (c) 2008-2009 Jonathan Arkell
+;;           (c) 2010 Dave Kerschner (docgnome)
 ;; Time-stamp: <2007-03-19 18:33:17 thorne>
-;; Author: thorne <thorne@timbral.net>, jonnay <jonnay@jonnay.net>
+;; Author: thorne <thorne@timbral.net>, jonnay <jonnay@jonnay.net>, docgnome <docgnome@gmail.com>
 ;; Created: 2007.3.16
 ;; Keywords: comm
 ;; Favorite Poet: E. E. Cummings
@@ -304,6 +305,29 @@
 ;;          - direct messages now use character counting function. (JA)
 ;;          - twitter diarrhea filtering function. (JA)
 ;;          - started work on i18n support.  (unfinished) (JA)
+;; - 0.3.6  - Added twit-open-link, and bound it to "o". (BC)
+;; - 0.3.7  - Applied patch from http://dme.org/emacs/twit.el.diff
+;;            and small fixes by peccu.
+;;          - Added '"' to 'white' of twit-favorite-face.
+;;          - Changed format twit-write-tweet.(peccu)
+;; - 0.3.8  - Exchange TAB mainly for indent to whitespaces.
+;;          - remove spaces end of line.
+;;          - fix some comments.
+;;          - Add `twit-show-favorites-tweets' for favorites.(peccu)
+;; - 0.3.9  - Add feature for `twit-visit-link'
+;;            timestamp of tweet, goto that tweet page.
+;;            in reply to USER of tweet, goto that reply tweet page.
+;;            source of tweet, goto sources page.(peccu)
+;; - 0.3.10 - Added support for new style retweets (docgnome)
+;;            the icon of the user who retweeted will appear next to
+;;            the icon of the user who originally tweeted it
+;;            users are prompted on attempting to retweet if they want
+;;            to use the new style, a la TweetDeck
+;; - 0.3.11 - Migrated to the versioned api at api.twitter.com/1 (docgnome)
+;;            the api at twitter.com is deprecated
+;; - 0.3.12 - Remove 'reply_to' from `twit-post-retweet'. (peccu)
+;;            - now you can select enable/disable of `fill-region' tweets
+;;            - add keybind "F" for `twit-show-favorites-tweets'
 
 ;;; TODO:
 ;; - remember style buffer posting.
@@ -401,7 +425,7 @@ opt to \"follow\", and the timeline will be updated automagickally.
 
 twit.el also makes use of the Todochiku package, which you can install from here:
 http://www.emacswiki.org/emacs/todochiku.el"
-  :version "0.1"
+  :version twit-version-number
   :group 'twit)
 
 (defcustom twit-user
@@ -474,6 +498,11 @@ all elisp packages."
   "Show user images beside each users tweet."
   :type 'boolean
   :group 'twit)
+
+(defcustom twit-fill-tweets t
+   "Apply `fill-region' to tweets."
+   :type 'boolean
+   :group 'twit)
 
 (defcustom twit-user-image-dir
   (concat (car image-load-path) "twitter")
@@ -702,6 +731,7 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
     ("n" . twit-next-tweet)
     ("p" . twit-previous-tweet)
 
+    ("F" . twit-show-favorites-tweets)
     ("*" . twit-add-favorite)
     ("-" . twit-remove-favorite)
 
@@ -711,6 +741,7 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
     ("S" . twit-search)
 
     ("v" . twit-visit-link)
+    ("o" . twit-open-link)
     ("A" . twit-analyse-user)
     ("G" . twit-analyse-graph-user)
     ("i" . twit-install-elisp)
@@ -732,7 +763,7 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
 (defun twit-mode-help ()
   "Show help messages during command `twit-mode'."
   (interactive)
-  (message "Help: %s" (append twit-key-list '(("r" . "Reload Current Page")))))
+  (message "Help: %s" (append twit-key-list '(("g" . "Reload Current Page")))))
 
 ;; *var
 (defvar twit-timer
@@ -745,7 +776,10 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
 
 (defvar twit-first-time-through nil)
 
-(defvar twit-proxy "172.25.25.4:808")
+(defvar twit-window nil
+  "Window object to get window-width.")
+
+(defvar twit-proxy "")
 
 ;;* const url
 (defconst twit-base-search-url "http://search.twitter.com")
@@ -754,6 +788,8 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
 
 (defconst twit-update-url
   (concat twit-base-url "/statuses/update.xml"))
+(defconst twit-retweet-file
+  (concat twit-base-url "/statuses/retweet/%s.xml"))
 (defconst twit-puplic-timeline-file
   (concat twit-base-url "/statuses/public_timeline.xml?count=40&page=%s"))
 (defconst twit-friend-timeline-file
@@ -777,7 +813,9 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
   (concat twit-base-url "/friendships/create/%s.xml"))
 (defconst twit-remove-friend-url
   (concat twit-base-url "/friendships/destroy/%s.xml"))
-
+;; favorites
+(defconst twit-favorites-url
+  (concat twit-base-url "/favorites.xml?page=%s"))
 (defconst twit-add-favorite-url
   (concat twit-base-url "/favorites/create/%s.xml"))
 (defconst twit-remove-favorite-url
@@ -967,8 +1005,9 @@ and not the response."
         (curl-args `("-s" "-k"
                      "-X" ,method
                      "-i" ,url
-                     "-x" ,twit-proxy
                      "--user" ,(format "%s:%s" twit-user twit-pass))))
+    (if twit-proxy
+        (setq curl-args `("-x" ,twit-proxy ,@curl-args)))
     (save-window-excursion
       (with-temp-buffer
         (apply 'call-process "curl" nil t nil curl-args)
@@ -1103,7 +1142,7 @@ STATUS is the status from HTTP, URL and CALLBACK were the args from `twit-parse-
 
 ;;* post handler
 (defun twit-handle-post (err success-msg error-msg)
-  "General method to hande a twit posting.
+  "General method to handle a twit posting.
 This will give us a Guarantee that our posting atually did work.
 Argument ERR Whether or not there was an error.  Set by `url-retrieve'.
 Argument SUCCESS-MSG Message when action was successful.
@@ -1398,6 +1437,23 @@ FILTER-TWEETS is an optional boolean to disregard filtering.
 TIMES-THROUGH is an integer representing the number of times a tweet has been
   displayed, for zebra-tabling."
   (let* ((tweet-id (xml-first-childs-value tweet 'id))
+         (retweet (xml-first-child tweet 'retweeted_status))
+         (retweeted-by
+          (if retweet
+              (or (xml-first-child tweet 'user) (xml-first-child tweet 'sender))))
+         (retweeted-by-user-id
+          (if retweet
+              (or (xml-first-childs-value retweeted-by 'screen_name) "??")))
+         (retweeted-by-user-img
+          (if (and retweet twit-show-user-images)
+              (twit-get-user-image (xml-first-childs-value retweeted-by 'profile_image_url)
+                                   retweeted-by-user-id)
+            nil))
+
+         (tweet
+          (if retweet
+              retweet
+            tweet))
          (user-info (or (xml-first-child tweet 'user) (xml-first-child tweet 'sender)))
          (user-id (or (xml-first-childs-value user-info 'screen_name) "??"))
          (user-name (xml-first-childs-value user-info 'name))
@@ -1409,7 +1465,10 @@ TIMES-THROUGH is an integer representing the number of times a tweet has been
          (timestamp (format-time-string twit-time-string (date-to-time (xml-first-childs-value tweet 'created_at))))
          (message (xml-substitute-special (xml-first-childs-value tweet 'text)))
          (src-info (xml-first-childs-value tweet 'source))
+         (src-url (xml-first-childs-value tweet 'source))
          (favorite (xml-first-childs-value tweet 'favorited))
+         (reply-to-status (xml-first-childs-value tweet 'in_reply_to_status_id))
+         (reply-to-user (xml-first-childs-value tweet 'in_reply_to_screen_name))
 
          (overlay-start 0)
          (overlay-end 0))
@@ -1418,6 +1477,9 @@ TIMES-THROUGH is an integer representing the number of times a tweet has been
                                       src-info))
       ;; remove the HTML link info; leave just the name (for now)
       (setq src-info (match-string 2 src-info)))
+    (when (and src-url (string-match (concat "<a h" "ref=\"\\([^\"]*\\)\".*>\\(.*\\)<" "/a>")
+                                      src-url))
+          (setq src-url (match-string 1 src-url)))
 
     (setq overlay-start (point))
 
@@ -1438,18 +1500,36 @@ TIMES-THROUGH is an integer representing the number of times a tweet has been
                                                    "")
                                                  " ")
                                          `((face . "twit-author-face")))
-    (insert ": ")
-    (twit-insert-with-overlay-attributes (twit-keymap-and-fontify-message message)
-                                         '((face . "twit-message-face"))
-                                         " ")
+    (insert "\n\t")
+    (let* ((message
+            (with-temp-buffer
+              (let ((fill-column (- (window-width twit-window) 2)))
+                (insert "\t")
+                (insert message)
+                (when twit-fill-tweets
+                  (fill-region (point-min) (point-max)))
+                (buffer-substring 2 (point-max))))))
+      (twit-insert-with-overlay-attributes (twit-keymap-and-fontify-message message)
+                                           '((face . "twit-message-face"))
+                                           " "))
 
     (insert "\n")
     (when (or timestamp location src-info)
       (twit-insert-with-overlay-attributes
        (concat "                          "
-               (when timestamp timestamp)
+               (when timestamp
+                 (setq timestamp (propertize timestamp
+                                             'twit-status tweet-id)))
                (when location (concat " @ " location))
-               (when src-info (concat " (" src-info ")"))
+               (when src-info
+                 (setq src-info (propertize (concat " (" src-info ")")
+                                            'twit-src src-url)))
+               (when reply-to-user
+                 (setq reply-to-user (propertize (concat " in reply to " reply-to-user)
+                                                 'twit-reply-status reply-to-status
+                                                 'twit-reply-user reply-to-user)))
+               (when retweet
+                 (setq retweet (propertize (concat " Retweeted by " retweeted-by-user-id))))
                "\n")
        '((face . "twit-info-face")) "" 'right))
     (setq overlay-end (point))
@@ -1862,15 +1942,18 @@ tweet with \".@\" or some other filler character."
 (defun twit-post-retweet ()
   "Retweet someone else's post."
   (interactive)
-  (let* ((reply-to (twit-get-text-property 'twit-user))
-         (parent-id (twit-get-text-property 'twit-id))
-         (retweet-text (twit-get-text-property 'twit-message))
-         (post (twit-query-for-post
-                (concat "Retweeting " reply-to)
-                (concat "RT @" reply-to ": " retweet-text " || "))))
-    (if (> (length post) 140)
-        (error twit-too-long-msg)
-      (twit-post-status twit-update-url post parent-id))))
+  (if (y-or-n-p "Would you like to use the new style retweet? ")
+      (let ((parent-id (twit-get-text-property 'twit-id)))
+        (twit-post-status (format twit-retweet-file parent-id)
+                          (twit-get-text-property 'twit-message)))
+    (let* ((reply-to (twit-get-text-property 'twit-user))
+           (retweet-text (twit-get-text-property 'twit-message))
+           (post (twit-query-for-post
+                  (concat "Retweeting " reply-to)
+                  (concat "RT @" reply-to ": " retweet-text " || "))))
+      (if (> (length post) 140)
+          (error twit-too-long-msg)
+        (twit-post-status twit-update-url post)))))
 
 ;;* post url
 ;;  Prompts for a URL, then compresses it and starts a tweet with the shortened URL in the body
@@ -1947,6 +2030,27 @@ long."
                       (concat "screen_name=" (url-hexify-string user))
                       twit-remove-friend-success-msg
                       twit-remove-friend-fail-msg))
+
+;;* your favorite tweets show interactive
+;;;###autoload
+(defun twit-show-favorites-tweets (page)
+  "Display a list of your favorite tweets .
+
+With a numeric prefix argument, it will skip to that PAGE like `twit-show-recent-tweets'."
+  (interactive "P")
+  (setq page (twit-check-page-prefix page))
+  (pop-to-buffer
+   (with-twit-buffer (concat "*Twit-favorites-" twit-user "*")
+                     (twit-write-title "Favorites of  %s (Page %s) %s\n"
+                                       twit-user page (format-time-string "%c"))
+                     (let ((times-through 0))
+                       (dolist
+                           (status-node (xml-get-children
+                                         (cadr (twit-parse-xml
+                                                (format twit-favorites-url page) "GET"))
+                                         'status))
+                         (twit-write-tweet status-node t times-through)
+                         (setq times-through (+ 1 times-through)))))))
 
 ;;* favorite add post
 (defun twit-add-favorite (post)
@@ -2200,13 +2304,47 @@ With a numeric prefix argument, it will skip to that PAGE like `twit-show-recent
   "Vist a link under the point.
 
 If the point is under a hyperlink, goto that link.
+If the point is under timestamp of tweet, goto that tweet page.
+If the point is under in reply to USER of tweet, goto that reply tweet page.
+If the point is under source, goto source page.
 If the point is under an @user, go to that users page.
 Otherwise goto the authors page."
   (interactive)
   (browse-url (or (twit-get-text-property 'twit-url)
+                  (when (twit-get-text-property 'twit-status) ;show tweet page for tweet
+                        (concat twit-base-url
+                                (twit-get-text-property 'twit-user)
+                                "/status/"
+                                (twit-get-text-property 'twit-status)))
+                  (when (twit-get-text-property 'twit-reply-user) ;show tweet page for reply
+                        (concat twit-base-url
+                                (twit-get-text-property 'twit-reply-user)
+                                "/status/"
+                                (twit-get-text-property 'twit-reply-status)))
+                  (when (twit-get-text-property 'twit-src) ;show source
+                    (twit-get-text-property 'twit-src))
                   (when (twit-get-text-property 'twit-user)
-                    (concat "http://bintweet.appspot.com/"
+                    (concat twit-base-url
                             (twit-get-text-property 'twit-user))))))
+
+(defun twit-open-link ()
+  "Visit (open) the first URL in current tweet.
+
+Check if the tweet under the point contains a URL, and visit the
+URL if there is one.  The point does not have to be pointing to
+the URL itself."
+  (interactive)
+  (let* ((end (next-single-char-property-change (point) 'twit-id))
+         (start (save-excursion
+                  (goto-char end)
+                  (previous-single-char-property-change (point) 'twit-id))))
+    (save-excursion
+      (goto-char start)
+      (if (search-forward-regexp twit-url-regex end t)
+          (progn
+            (forward-char -1)
+            (twit-visit-link))
+        (message "No URL found in this tweet!")))))
 
 ;;* analyse interactive
 (defun twit-analyse-user ()
