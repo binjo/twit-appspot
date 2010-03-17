@@ -445,7 +445,7 @@ If this is set, attempt to automagickally log into twitter."
   :set 'twit-set-user-pass)
 
 (defcustom twit-new-tweet-hook
-  '()
+  '(twit-update-mode-line)
   "Functions to execute when there is a new tweet.
 If you have Todochiku, add \"twit-todochiku\" here, and you will be
 notified when a new tweet appears."
@@ -780,6 +780,14 @@ AS WELL.  Otherwise your primary login credentials may get wacked."
   "Window object to get window-width.")
 
 (defvar twit-proxy "")
+
+(defvar twit-mode-line-string ""
+  "Show number of new tweets on the mode line.
+
+You may want to add this to `global-mode-string'.")
+
+(defvar twit-mode-line-trigger nil
+  "Trigger of showing status in mode line.")
 
 ;;* const url
 (defconst twit-base-search-url "http://search.twitter.com")
@@ -1400,6 +1408,15 @@ XML-DATA is the sxml (with http header)."
 
   ;; this needs more TLC
   (if twit-debug-mem (message (garbage-collect))))
+
+(defun twit-update-mode-line ()
+  (if (string-match "*Twit" (buffer-name (current-buffer)))
+      (setq twit-mode-line-string "")
+    (unless twit-mode-line-trigger
+      (setq twit-mode-line-string
+            (format "T[%s]" (cadr twit-last-tweet)))))
+  (setq twit-mode-line-trigger (not twit-mode-line-trigger))
+  (force-mode-line-update))
 
 ;;*var filter
 (defvar twit-last-author '(nil .0)
@@ -2412,7 +2429,9 @@ Null prefix argument turns off the mode.
   ("\C-c\C-ts" . twit-show-recent-tweets))
 :global t
 :group 'twit
-:version twit-version-number)
+:version twit-version-number
+(add-to-list 'global-mode-string 'twit-mode-line-string t)
+(add-hook 'window-configuration-change-hook 'twit-update-mode-line))
 (provide 'twit-appspot)
 
 
